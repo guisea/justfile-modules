@@ -46,6 +46,24 @@ not something this repo needs to know about.
 - **`version.just`** - semantic-release-aware version resolution
   (`semantic-release` → exact git tag → short commit hash → dev-timestamp fallback),
   shared by every repo that tags images by version.
+- **`semrel.just`** - scaffolds `.release.yml` for
+  [go-semantic-release](https://github.com/go-semantic-release/semantic-release), the
+  tool that actually cuts releases in CI (via `go-semantic-release/action@v1`). One
+  recipe per provider - `scaffold-gitea`, `scaffold-github`, `scaffold-gitlab`,
+  `scaffold-git` (tag-only, no hosted release object - the fallback for anything
+  without a plugin, e.g. Bitbucket). Owner/repo/host default to whatever `git remote
+  get-url origin` resolves to, so most repos just need e.g.
+  `just semrel::scaffold-gitea` with no args. Refuses to overwrite an existing
+  `.release.yml`. Distinct from `version.just`: that one resolves a version for local
+  use (build tags, etc); this one configures the tool that publishes the release
+  itself.
+
+  ```bash
+  just semrel::detect                          # see what would be auto-detected
+  just semrel::scaffold-gitea                  # gitea, using origin's owner/repo/host
+  just semrel::scaffold-github myorg myrepo    # github, explicit owner/repo
+  just semrel::scaffold-git me@example.com     # plain git tags - e.g. Bitbucket
+  ```
 
 ## Updating a consumer repo to a newer module version
 
