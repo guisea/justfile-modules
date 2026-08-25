@@ -3,16 +3,23 @@
 # are the only things this module asks the consumer to set.
 # Import with: mod docker 'justfile-modules/docker.just'
 #
-# Per-repo config (env vars, or `export`ed from the consumer's own justfile before the
-# `mod` line - `just` resolves module variables from the process environment):
+# Per-repo config, read from real process env vars - module variables are resolved via
+# env_var_or_default, which only sees actual OS environment, NOT `export X := "..."`
+# assignments in the consumer's own justfile (modules don't inherit those). So set these
+# either in your shell, or in a `.env` file next to the consuming justfile with
+# `set dotenv-load` at its top:
 #   IMAGE       - image name, e.g. "finchkeep"            (required)
 #   REGISTRY    - registry host/namespace, e.g. "ghcr.io/cybercinch" (required for push/login)
+#   REGISTRIES  - comma-separated registries to push to, e.g. "docker.io/me,123.dkr.ecr.us-east-1.amazonaws.com"
+#                 (defaults to REGISTRY, so single-registry repos can ignore this entirely -
+#                 push/buildx-push transparently fan out to one registry or many)
 #   DOCKERFILE  - defaults to "Dockerfile"
 #   CONTEXT     - build context dir, defaults to "."
 #   PLATFORMS   - buildx target platforms, defaults to "linux/amd64,linux/arm64"
 
 image := env_var_or_default("IMAGE", "app")
 registry := env_var_or_default("REGISTRY", "")
+registries := env_var_or_default("REGISTRIES", registry)
 dockerfile := env_var_or_default("DOCKERFILE", "Dockerfile")
 context := env_var_or_default("CONTEXT", ".")
 platforms := env_var_or_default("PLATFORMS", "linux/amd64,linux/arm64")
@@ -40,23 +47,27 @@ build tag dockerfile=dockerfile also_latest="false":
       "{{context}}"
     echo "✅ built   {{image}}:{{tag}}"
 
-# 📤 Tag + push a locally-built image to `{{registry}}/{{image}}:tag` (+ `:latest`)
+# 📤 Tag + push a locally-built image to each of `{{registries}}` (+ `:latest`)
 push tag also_latest="true":
     #!/usr/bin/env bash
     set -euo pipefail
-    # Assumes `just docker::login` already ran for {{registry}}.
-    if [[ -z "{{registry}}" ]]; then
-        echo "❌ REGISTRY is not set" >&2
+    # Assumes `just docker::login` already ran for every registry in REGISTRIES.
+    if [[ -z "{{registries}}" ]]; then
+        echo "❌ REGISTRY/REGISTRIES is not set" >&2
         exit 1
     fi
-    echo "📤 push    {{image}}:{{tag}}  →  {{registry}}"
-    docker tag "{{image}}:{{tag}}" "{{registry}}/{{image}}:{{tag}}"
-    docker push "{{registry}}/{{image}}:{{tag}}"
-    if [[ "{{also_latest}}" == "true" ]]; then
-        docker tag "{{image}}:latest" "{{registry}}/{{image}}:latest"
-        docker push "{{registry}}/{{image}}:latest"
-    fi
-    echo "✅ pushed  {{image}}:{{tag}}"
+    IFS=', ' read -ra REGS <<< "{{registries}}"
+    for REG in "${REGS[@]}"; do
+        [[ -z "$REG" ]] && continue
+        echo "📤 push    {{image}}:{{tag}}  →  $REG"
+        docker tag "{{image}}:{{tag}}" "$REG/{{image}}:{{tag}}"
+        docker push "$REG/{{image}}:{{tag}}"
+        if [[ "{{also_latest}}" == "true" ]]; then
+            docker tag "{{image}}:latest" "$REG/{{image}}:latest"
+            docker push "$REG/{{image}}:latest"
+        fi
+    done
+    echo "✅ pushed  {{image}}:{{tag}}  →  {{registries}}"
 
 # 🏗️  Create (or reuse) the multiarch buildx builder with QEMU emulation
 buildx-setup:
@@ -89,21 +100,26 @@ buildx-build tag platform dockerfile=dockerfile: buildx-setup
       "{{context}}"
     echo "✅ built   {{image}}:{{tag}}  [{{platform}}]"
 
-# 🐳📤 Build + push a multi-arch image straight to `{{registry}}/{{image}}:tag`
+# 🐳📤 Build + push a multi-arch image straight to each of `{{registries}}`
 buildx-push tag dockerfile=dockerfile also_latest="true": buildx-setup
     #!/usr/bin/env bash
     set -euo pipefail
     # Multi-platform images can only be pushed, never loaded locally - see
     # buildx-build for a local single-platform test build.
-    if [[ -z "{{registry}}" ]]; then
-        echo "❌ REGISTRY is not set" >&2
+    if [[ -z "{{registries}}" ]]; then
+        echo "❌ REGISTRY/REGISTRIES is not set" >&2
         exit 1
     fi
-    TAGS=(-t "{{registry}}/{{image}}:{{tag}}")
-    if [[ "{{also_latest}}" == "true" ]]; then
-        TAGS+=(-t "{{registry}}/{{image}}:latest")
-    fi
-    echo "🐳📤 build+push  {{image}}:{{tag}}  [{{platforms}}]  →  {{registry}}"
+    IFS=', ' read -ra REGS <<< "{{registries}}"
+    TAGS=()
+    for REG in "${REGS[@]}"; do
+        [[ -z "$REG" ]] && continue
+        TAGS+=(-t "$REG/{{image}}:{{tag}}")
+        if [[ "{{also_latest}}" == "true" ]]; then
+            TAGS+=(-t "$REG/{{image}}:latest")
+        fi
+    done
+    echo "🐳📤 build+push  {{image}}:{{tag}}  [{{platforms}}]  →  {{registries}}"
     docker buildx build \
       --builder multiarch \
       --platform "{{platforms}}" \
@@ -114,14 +130,16 @@ buildx-push tag dockerfile=dockerfile also_latest="true": buildx-setup
       "${TAGS[@]}" \
       --push \
       "{{context}}"
-    echo "✅ pushed  {{image}}:{{tag}}  [{{platforms}}]"
+    echo "✅ pushed  {{image}}:{{tag}}  [{{platforms}}]  →  {{registries}}"
 
-# 🔐 Log in to `{{registry}}` with a token read from an env var (never a CLI arg)
-login user token_env_var="REGISTRY_TOKEN":
+# 🔐 Log in to `registry` (defaults to `{{registry}}`) with a token read from an env var
+# (never a CLI arg). Call once per registry when pushing to several with different
+# credentials, e.g.:
+#   just docker::login myuser REGISTRY_TOKEN docker.io/myuser
+#   just docker::login AWS ECR_TOKEN 123456789.dkr.ecr.us-east-1.amazonaws.com
+login user token_env_var="REGISTRY_TOKEN" registry=registry:
     #!/usr/bin/env bash
     set -euo pipefail
-    # Reads $REGISTRY_TOKEN by default (or whatever token_env_var names) so the
-    # secret never lands in shell history or a process listing.
     if [[ -z "{{registry}}" ]]; then
         echo "❌ REGISTRY is not set" >&2
         exit 1
@@ -133,6 +151,29 @@ login user token_env_var="REGISTRY_TOKEN":
     fi
     echo "🔐 login   {{user}}@{{registry}}"
     echo "$TOKEN" | docker login "{{registry}}" --username "{{user}}" --password-stdin
+    echo "✅ logged in to {{registry}}"
+
+# 🔐 Log in to an ECR registry using your current AWS SSO session (run `aws sso login
+# --profile <profile>` yourself first - this won't trigger the interactive browser flow).
+# Call once per ECR registry/account, e.g.:
+#   just docker::login-ecr 123456789.dkr.ecr.us-east-1.amazonaws.com us-east-1 my-sso-profile
+login-ecr registry=registry region=env_var_or_default("AWS_REGION", "us-east-1") profile=env_var_or_default("AWS_PROFILE", ""):
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -z "{{registry}}" ]]; then
+        echo "❌ REGISTRY is not set" >&2
+        exit 1
+    fi
+    PROFILE_ARGS=()
+    if [[ -n "{{profile}}" ]]; then
+        PROFILE_ARGS=(--profile "{{profile}}")
+    fi
+    echo "🔐 login   AWS@{{registry}}  (region {{region}})"
+    if ! aws ecr get-login-password --region "{{region}}" "${PROFILE_ARGS[@]}" \
+        | docker login "{{registry}}" --username AWS --password-stdin; then
+        echo "❌ ECR login failed - is your SSO session still active? Try: aws sso login ${PROFILE_ARGS[*]}" >&2
+        exit 1
+    fi
     echo "✅ logged in to {{registry}}"
 
 # 🧹 Prune dangling images/containers/build cache

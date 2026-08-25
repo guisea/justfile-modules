@@ -13,12 +13,18 @@ Add as a submodule at `justfile-modules/` in your repo root:
 git submodule add https://hub.cybercinch.nz/cybercinch/justfile-modules.git justfile-modules
 ```
 
-In your root `justfile`, set the per-repo config and import the modules you need:
+Module variables are resolved from the real OS environment, not from `export X :=
+"..."` assignments in your justfile (modules don't inherit those) - so set config via
+your shell or a `.env` file. Each module that needs config ships its own
+`.env.example.<module>` - append the ones you use into `.env` in your repo root and add
+`set dotenv-load` to the top of your justfile:
+
+```bash
+cat justfile-modules/.env.example.docker >> .env
+```
 
 ```just
-export IMAGE := "finchkeep"
-export REGISTRY := "hub.cybercinch.nz/cybercinch"
-export DOCKERFILE := "Dockerfile"
+set dotenv-load
 
 mod docker 'justfile-modules/docker.just'
 mod version 'justfile-modules/version.just'
@@ -40,9 +46,12 @@ not something this repo needs to know about.
 ## Modules
 
 - **`docker.just`** - build / buildx / push / login / clean. Parameterized by `IMAGE`,
-  `REGISTRY`, `DOCKERFILE`, `CONTEXT`, `PLATFORMS` (all env vars) so the build logic
-  itself never changes between repos - only auth, registry, and image name do. See the
-  header comment in the file for the full list.
+  `REGISTRY` (or `REGISTRIES` for pushing to several registries at once, e.g. Docker
+  Hub + ECR), `DOCKERFILE`, `CONTEXT`, `PLATFORMS` (all env vars) so the build logic
+  itself never changes between repos - only auth, registry, and image name do. Supports
+  token-based login (`docker::login`) and ECR via AWS SSO (`docker::login-ecr`). See
+  [`docker.md`](docker.md) for the full recipe reference and
+  [`.env.example.docker`](.env.example.docker) for a config template.
 - **`version.just`** - semantic-release-aware version resolution
   (`semantic-release` → exact git tag → short commit hash → dev-timestamp fallback),
   shared by every repo that tags images by version.
