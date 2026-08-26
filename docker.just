@@ -16,6 +16,13 @@
 #   DOCKERFILE  - defaults to "Dockerfile"
 #   CONTEXT     - build context dir, defaults to "."
 #   PLATFORMS   - buildx target platforms, defaults to "linux/amd64,linux/arm64"
+#   CODEARTIFACT_URL          - optional NuGet CodeArtifact package source URL, passed as a build arg
+#   CODEARTIFACT_TOKEN        - optional NuGet CodeArtifact auth token, passed as BuildKit secret id=ca_token
+#   CODEARTIFACT_DOMAIN       - optional; derived from CODEARTIFACT_URL when omitted
+#   CODEARTIFACT_DOMAIN_OWNER - optional; derived from CODEARTIFACT_URL when omitted
+#   CODEARTIFACT_REGION       - optional; defaults to AWS_REGION or is derived from CODEARTIFACT_URL
+#   EXTRA_BUILD_ARGS          - optional semicolon-separated build args, e.g. "NPM_REGISTRY_URL=https://..."
+#   EXTRA_BUILD_SECRETS       - optional semicolon-separated BuildKit secrets, e.g. "id=npm_token,env=NPM_TOKEN"
 
 image := env_var_or_default("IMAGE", "app")
 registry := env_var_or_default("REGISTRY", "")
@@ -31,7 +38,7 @@ platforms := env_var_or_default("PLATFORMS", "linux/amd64,linux/arm64")
 _build_date := `date -u +%Y-%m-%dT%H:%M:%SZ`
 _git_commit := `git rev-parse --short HEAD 2>/dev/null || echo unknown`
 
-# 🐳 Single-arch build, tagged `{{image}}:tag` (+ `:latest` if also_latest=true)
+# 🐳 Build local image.
 build tag dockerfile=dockerfile also_latest="false":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -42,16 +49,67 @@ build tag dockerfile=dockerfile also_latest="false":
     if [[ "{{also_latest}}" == "true" ]]; then
         TAGS+=(-t "{{image}}:latest")
     fi
+    BUILD_FLAGS=(
+      --build-arg APP_VERSION="{{tag}}"
+      --build-arg CONTAINER_VERSION="{{tag}}"
+      --build-arg APP_BUILD_DATE="{{_build_date}}"
+      --build-arg APP_GIT_COMMIT="{{_git_commit}}"
+    )
+    if [[ -n "${CODEARTIFACT_URL:-}" ]]; then
+        if [[ -z "${CODEARTIFACT_TOKEN:-}" ]]; then
+            CA_DOMAIN="${CODEARTIFACT_DOMAIN:-}"
+            CA_DOMAIN_OWNER="${CODEARTIFACT_DOMAIN_OWNER:-}"
+            CA_REGION="${CODEARTIFACT_REGION:-${AWS_REGION:-}}"
+            if [[ "${CODEARTIFACT_URL}" =~ ^https?://([A-Za-z0-9][A-Za-z0-9_-]*)-([0-9]{12})\.d\.codeartifact\.([A-Za-z0-9-]+)\.amazonaws\.com/ ]]; then
+                CA_DOMAIN="${CA_DOMAIN:-${BASH_REMATCH[1]}}"
+                CA_DOMAIN_OWNER="${CA_DOMAIN_OWNER:-${BASH_REMATCH[2]}}"
+                CA_REGION="${CA_REGION:-${BASH_REMATCH[3]}}"
+            fi
+            if [[ -z "${CA_DOMAIN}" || -z "${CA_DOMAIN_OWNER}" || -z "${CA_REGION}" ]]; then
+                echo "❌ CODEARTIFACT_URL is set but CodeArtifact domain/owner/region could not be determined" >&2
+                echo "   Set CODEARTIFACT_DOMAIN, CODEARTIFACT_DOMAIN_OWNER, and CODEARTIFACT_REGION/AWS_REGION." >&2
+                exit 1
+            fi
+            PROFILE_ARGS=()
+            if [[ -n "${AWS_PROFILE:-}" ]]; then
+                PROFILE_ARGS=(--profile "${AWS_PROFILE}")
+            fi
+            echo "🔐 codeartifact token  ${CA_DOMAIN}/${CA_DOMAIN_OWNER}  (${CA_REGION})"
+            export CODEARTIFACT_TOKEN="$(aws codeartifact get-authorization-token \
+              --domain "${CA_DOMAIN}" \
+              --domain-owner "${CA_DOMAIN_OWNER}" \
+              --region "${CA_REGION}" \
+              "${PROFILE_ARGS[@]}" \
+              --query authorizationToken \
+              --output text)"
+        fi
+        BUILD_FLAGS+=(
+          --build-arg "CODEARTIFACT_URL=${CODEARTIFACT_URL}"
+          --secret id=ca_token,env=CODEARTIFACT_TOKEN
+        )
+    fi
+    if [[ -n "${EXTRA_BUILD_ARGS:-}" ]]; then
+        IFS=';' read -ra EXTRA_ARGS <<< "${EXTRA_BUILD_ARGS}"
+        for ARG in "${EXTRA_ARGS[@]}"; do
+            [[ -z "${ARG}" ]] && continue
+            BUILD_FLAGS+=(--build-arg "${ARG}")
+        done
+    fi
+    if [[ -n "${EXTRA_BUILD_SECRETS:-}" ]]; then
+        IFS=';' read -ra EXTRA_SECRETS <<< "${EXTRA_BUILD_SECRETS}"
+        for SECRET in "${EXTRA_SECRETS[@]}"; do
+            [[ -z "${SECRET}" ]] && continue
+            BUILD_FLAGS+=(--secret "${SECRET}")
+        done
+    fi
     docker build \
       -f "{{dockerfile}}" \
-      --build-arg APP_VERSION="{{tag}}" \
-      --build-arg APP_BUILD_DATE="{{_build_date}}" \
-      --build-arg APP_GIT_COMMIT="{{_git_commit}}" \
+      "${BUILD_FLAGS[@]}" \
       "${TAGS[@]}" \
       "{{context}}"
     echo "✅ built   {{image}}:{{tag}}"
 
-# 📤 Tag + push a locally-built image to each of `{{registries}}` (+ `:latest`)
+# 📤 Push local image.
 push tag also_latest="true":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -73,7 +131,7 @@ push tag also_latest="true":
     done
     echo "✅ pushed  {{image}}:{{tag}}  →  {{registries}}"
 
-# 🏗️  Create (or reuse) the multiarch buildx builder with QEMU emulation
+# 🏗️ Prepare buildx.
 buildx-setup:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -87,24 +145,75 @@ buildx-setup:
     docker buildx inspect multiarch
     echo "✅ buildx builder 'multiarch' ready"
 
-# 🐳 Multi-arch build loaded locally (single platform only - buildx can't --load multi-arch)
+# 🐳 Build one platform.
 buildx-build tag platform dockerfile=dockerfile: buildx-setup
     #!/usr/bin/env bash
     set -euo pipefail
     echo "🐳 build   {{image}}:{{tag}}  [{{platform}}]  ({{dockerfile}})"
+    BUILD_FLAGS=(
+      --build-arg APP_VERSION="{{tag}}"
+      --build-arg CONTAINER_VERSION="{{tag}}"
+      --build-arg APP_BUILD_DATE="{{_build_date}}"
+      --build-arg APP_GIT_COMMIT="{{_git_commit}}"
+    )
+    if [[ -n "${CODEARTIFACT_URL:-}" ]]; then
+        if [[ -z "${CODEARTIFACT_TOKEN:-}" ]]; then
+            CA_DOMAIN="${CODEARTIFACT_DOMAIN:-}"
+            CA_DOMAIN_OWNER="${CODEARTIFACT_DOMAIN_OWNER:-}"
+            CA_REGION="${CODEARTIFACT_REGION:-${AWS_REGION:-}}"
+            if [[ "${CODEARTIFACT_URL}" =~ ^https?://([A-Za-z0-9][A-Za-z0-9_-]*)-([0-9]{12})\.d\.codeartifact\.([A-Za-z0-9-]+)\.amazonaws\.com/ ]]; then
+                CA_DOMAIN="${CA_DOMAIN:-${BASH_REMATCH[1]}}"
+                CA_DOMAIN_OWNER="${CA_DOMAIN_OWNER:-${BASH_REMATCH[2]}}"
+                CA_REGION="${CA_REGION:-${BASH_REMATCH[3]}}"
+            fi
+            if [[ -z "${CA_DOMAIN}" || -z "${CA_DOMAIN_OWNER}" || -z "${CA_REGION}" ]]; then
+                echo "❌ CODEARTIFACT_URL is set but CodeArtifact domain/owner/region could not be determined" >&2
+                echo "   Set CODEARTIFACT_DOMAIN, CODEARTIFACT_DOMAIN_OWNER, and CODEARTIFACT_REGION/AWS_REGION." >&2
+                exit 1
+            fi
+            PROFILE_ARGS=()
+            if [[ -n "${AWS_PROFILE:-}" ]]; then
+                PROFILE_ARGS=(--profile "${AWS_PROFILE}")
+            fi
+            echo "🔐 codeartifact token  ${CA_DOMAIN}/${CA_DOMAIN_OWNER}  (${CA_REGION})"
+            export CODEARTIFACT_TOKEN="$(aws codeartifact get-authorization-token \
+              --domain "${CA_DOMAIN}" \
+              --domain-owner "${CA_DOMAIN_OWNER}" \
+              --region "${CA_REGION}" \
+              "${PROFILE_ARGS[@]}" \
+              --query authorizationToken \
+              --output text)"
+        fi
+        BUILD_FLAGS+=(
+          --build-arg "CODEARTIFACT_URL=${CODEARTIFACT_URL}"
+          --secret id=ca_token,env=CODEARTIFACT_TOKEN
+        )
+    fi
+    if [[ -n "${EXTRA_BUILD_ARGS:-}" ]]; then
+        IFS=';' read -ra EXTRA_ARGS <<< "${EXTRA_BUILD_ARGS}"
+        for ARG in "${EXTRA_ARGS[@]}"; do
+            [[ -z "${ARG}" ]] && continue
+            BUILD_FLAGS+=(--build-arg "${ARG}")
+        done
+    fi
+    if [[ -n "${EXTRA_BUILD_SECRETS:-}" ]]; then
+        IFS=';' read -ra EXTRA_SECRETS <<< "${EXTRA_BUILD_SECRETS}"
+        for SECRET in "${EXTRA_SECRETS[@]}"; do
+            [[ -z "${SECRET}" ]] && continue
+            BUILD_FLAGS+=(--secret "${SECRET}")
+        done
+    fi
     docker buildx build \
       --builder multiarch \
       --platform "{{platform}}" \
       -f "{{dockerfile}}" \
-      --build-arg APP_VERSION="{{tag}}" \
-      --build-arg APP_BUILD_DATE="{{_build_date}}" \
-      --build-arg APP_GIT_COMMIT="{{_git_commit}}" \
+      "${BUILD_FLAGS[@]}" \
       -t "{{image}}:{{tag}}" \
       --load \
       "{{context}}"
     echo "✅ built   {{image}}:{{tag}}  [{{platform}}]"
 
-# 🐳📤 Build + push a multi-arch image straight to each of `{{registries}}`
+# 🐳📤 Build and push.
 buildx-push tag dockerfile=dockerfile also_latest="true": buildx-setup
     #!/usr/bin/env bash
     set -euo pipefail
@@ -123,24 +232,71 @@ buildx-push tag dockerfile=dockerfile also_latest="true": buildx-setup
             TAGS+=(-t "$REG/{{image}}:latest")
         fi
     done
+    BUILD_FLAGS=(
+      --build-arg APP_VERSION="{{tag}}"
+      --build-arg CONTAINER_VERSION="{{tag}}"
+      --build-arg APP_BUILD_DATE="{{_build_date}}"
+      --build-arg APP_GIT_COMMIT="{{_git_commit}}"
+    )
+    if [[ -n "${CODEARTIFACT_URL:-}" ]]; then
+        if [[ -z "${CODEARTIFACT_TOKEN:-}" ]]; then
+            CA_DOMAIN="${CODEARTIFACT_DOMAIN:-}"
+            CA_DOMAIN_OWNER="${CODEARTIFACT_DOMAIN_OWNER:-}"
+            CA_REGION="${CODEARTIFACT_REGION:-${AWS_REGION:-}}"
+            if [[ "${CODEARTIFACT_URL}" =~ ^https?://([A-Za-z0-9][A-Za-z0-9_-]*)-([0-9]{12})\.d\.codeartifact\.([A-Za-z0-9-]+)\.amazonaws\.com/ ]]; then
+                CA_DOMAIN="${CA_DOMAIN:-${BASH_REMATCH[1]}}"
+                CA_DOMAIN_OWNER="${CA_DOMAIN_OWNER:-${BASH_REMATCH[2]}}"
+                CA_REGION="${CA_REGION:-${BASH_REMATCH[3]}}"
+            fi
+            if [[ -z "${CA_DOMAIN}" || -z "${CA_DOMAIN_OWNER}" || -z "${CA_REGION}" ]]; then
+                echo "❌ CODEARTIFACT_URL is set but CodeArtifact domain/owner/region could not be determined" >&2
+                echo "   Set CODEARTIFACT_DOMAIN, CODEARTIFACT_DOMAIN_OWNER, and CODEARTIFACT_REGION/AWS_REGION." >&2
+                exit 1
+            fi
+            PROFILE_ARGS=()
+            if [[ -n "${AWS_PROFILE:-}" ]]; then
+                PROFILE_ARGS=(--profile "${AWS_PROFILE}")
+            fi
+            echo "🔐 codeartifact token  ${CA_DOMAIN}/${CA_DOMAIN_OWNER}  (${CA_REGION})"
+            export CODEARTIFACT_TOKEN="$(aws codeartifact get-authorization-token \
+              --domain "${CA_DOMAIN}" \
+              --domain-owner "${CA_DOMAIN_OWNER}" \
+              --region "${CA_REGION}" \
+              "${PROFILE_ARGS[@]}" \
+              --query authorizationToken \
+              --output text)"
+        fi
+        BUILD_FLAGS+=(
+          --build-arg "CODEARTIFACT_URL=${CODEARTIFACT_URL}"
+          --secret id=ca_token,env=CODEARTIFACT_TOKEN
+        )
+    fi
+    if [[ -n "${EXTRA_BUILD_ARGS:-}" ]]; then
+        IFS=';' read -ra EXTRA_ARGS <<< "${EXTRA_BUILD_ARGS}"
+        for ARG in "${EXTRA_ARGS[@]}"; do
+            [[ -z "${ARG}" ]] && continue
+            BUILD_FLAGS+=(--build-arg "${ARG}")
+        done
+    fi
+    if [[ -n "${EXTRA_BUILD_SECRETS:-}" ]]; then
+        IFS=';' read -ra EXTRA_SECRETS <<< "${EXTRA_BUILD_SECRETS}"
+        for SECRET in "${EXTRA_SECRETS[@]}"; do
+            [[ -z "${SECRET}" ]] && continue
+            BUILD_FLAGS+=(--secret "${SECRET}")
+        done
+    fi
     echo "🐳📤 build+push  {{image}}:{{tag}}  [{{platforms}}]  →  {{registries}}"
     docker buildx build \
       --builder multiarch \
       --platform "{{platforms}}" \
       -f "{{dockerfile}}" \
-      --build-arg APP_VERSION="{{tag}}" \
-      --build-arg APP_BUILD_DATE="{{_build_date}}" \
-      --build-arg APP_GIT_COMMIT="{{_git_commit}}" \
+      "${BUILD_FLAGS[@]}" \
       "${TAGS[@]}" \
       --push \
       "{{context}}"
     echo "✅ pushed  {{image}}:{{tag}}  [{{platforms}}]  →  {{registries}}"
 
-# 🔐 Log in to `registry` (defaults to `{{registry}}`) with a token read from an env var
-# (never a CLI arg). Call once per registry when pushing to several with different
-# credentials, e.g.:
-#   just docker::login myuser REGISTRY_TOKEN docker.io/myuser
-#   just docker::login AWS ECR_TOKEN 123456789.dkr.ecr.us-east-1.amazonaws.com
+# 🔐 Registry login.
 login user token_env_var="REGISTRY_TOKEN" registry=registry:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -157,10 +313,7 @@ login user token_env_var="REGISTRY_TOKEN" registry=registry:
     echo "$TOKEN" | docker login "{{registry}}" --username "{{user}}" --password-stdin
     echo "✅ logged in to {{registry}}"
 
-# 🔐 Log in to an ECR registry using your current AWS SSO session (run `aws sso login
-# --profile <profile>` yourself first - this won't trigger the interactive browser flow).
-# Call once per ECR registry/account, e.g.:
-#   just docker::login-ecr 123456789.dkr.ecr.us-east-1.amazonaws.com us-east-1 my-sso-profile
+# 🔐 ECR login.
 login-ecr registry=_ecr_registry region=env_var_or_default("AWS_REGION", "us-east-1") profile=env_var_or_default("AWS_PROFILE", ""):
     #!/usr/bin/env bash
     set -euo pipefail
@@ -180,7 +333,7 @@ login-ecr registry=_ecr_registry region=env_var_or_default("AWS_REGION", "us-eas
     fi
     echo "✅ logged in to {{registry}}"
 
-# 🧹 Prune dangling images/containers/build cache
+# 🧹 Prune Docker.
 clean:
     #!/usr/bin/env bash
     set -euo pipefail

@@ -1,7 +1,7 @@
 # justfile-modules
 
 Reusable [`just`](https://github.com/casey/just) recipe modules, shared across
-cybercinch/guise repos as a git submodule + `just`'s native `mod` import. The goal:
+repos as a git submodule + `just`'s native `mod` import. The goal:
 build/push/version logic lives here once; each repo's own justfile only supplies the
 bits that actually differ - image name, registry, auth.
 
