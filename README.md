@@ -10,7 +10,7 @@ bits that actually differ - image name, registry, auth.
 Add as a submodule at `justfile-modules/` in your repo root:
 
 ```bash
-git submodule add https://hub.cybercinch.nz/cybercinch/justfile-modules.git justfile-modules
+git submodule add https://github.com/guisea/justfile-modules.git justfile-modules
 ```
 
 Module variables are resolved from the real OS environment, not from `export X :=
