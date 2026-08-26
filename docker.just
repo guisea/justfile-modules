@@ -20,6 +20,10 @@
 image := env_var_or_default("IMAGE", "app")
 registry := env_var_or_default("REGISTRY", "")
 registries := env_var_or_default("REGISTRIES", registry)
+# First entry in `registries` that looks like an ECR host, else falls back to `registry` -
+# lets `login-ecr` default sensibly when REGISTRIES mixes ECR with other registries (e.g.
+# Docker Hub) and REGISTRY itself points elsewhere.
+_ecr_registry := shell('printf "%s" "$1" | tr "," "\n" | grep -m1 "\.dkr\.ecr\." || printf "%s" "$2"', registries, registry)
 dockerfile := env_var_or_default("DOCKERFILE", "Dockerfile")
 context := env_var_or_default("CONTEXT", ".")
 platforms := env_var_or_default("PLATFORMS", "linux/amd64,linux/arm64")
@@ -157,7 +161,7 @@ login user token_env_var="REGISTRY_TOKEN" registry=registry:
 # --profile <profile>` yourself first - this won't trigger the interactive browser flow).
 # Call once per ECR registry/account, e.g.:
 #   just docker::login-ecr 123456789.dkr.ecr.us-east-1.amazonaws.com us-east-1 my-sso-profile
-login-ecr registry=registry region=env_var_or_default("AWS_REGION", "us-east-1") profile=env_var_or_default("AWS_PROFILE", ""):
+login-ecr registry=_ecr_registry region=env_var_or_default("AWS_REGION", "us-east-1") profile=env_var_or_default("AWS_PROFILE", ""):
     #!/usr/bin/env bash
     set -euo pipefail
     if [[ -z "{{registry}}" ]]; then

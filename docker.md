@@ -86,7 +86,7 @@ just docker::login myuser REGISTRY_TOKEN docker.io/myuser
 just docker::login myghcruser GHCR_TOKEN ghcr.io/cybercinch
 ```
 
-### `login-ecr registry=registry region=$AWS_REGION profile=$AWS_PROFILE`
+### `login-ecr registry=<ecr entry in registries, else registry> region=$AWS_REGION profile=$AWS_PROFILE`
 
 Logs in to an ECR registry using your **current AWS SSO session** - runs
 `aws ecr get-login-password` and pipes it into `docker login`. This does *not* trigger
@@ -96,6 +96,10 @@ the interactive browser SSO flow; run that yourself first:
 aws sso login --profile my-sso-profile
 just docker::login-ecr 123456789012.dkr.ecr.us-east-1.amazonaws.com us-east-1 my-sso-profile
 ```
+
+If called with no `registry` arg, it defaults to whichever entry in `REGISTRIES` looks
+like an ECR host (`*.dkr.ecr.*`), falling back to `REGISTRY` if none match - so mixed
+Docker Hub + ECR setups don't need `REGISTRY` itself to point at ECR.
 
 If the SSO session has expired, the recipe fails with a reminder to re-run
 `aws sso login`, rather than hanging on a browser prompt.
