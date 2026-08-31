@@ -1,11 +1,12 @@
-# Run Snyk dependency and code scans, writing reports for triage.
-
-snyk_report_dir := env_var_or_default("SNYK_REPORT_DIR", ".snyk-reports")
+root_dir := justfile_directory()
+snyk_report_dir := env_var_or_default("SNYK_REPORT_DIR", "{{ root_dir }}/.snyk-reports")
 snyk_args := env_var_or_default("SNYK_ADDITIONAL_ARGS", "")
 
+# Run Snyk dependency and code scans, writing reports for triage.
 full:
     @mkdir -p {{ snyk_report_dir }}
     @set +e; \
+      cd {{ root_dir }} && \
       snyk test --all-projects {{ snyk_args }} 2>&1 | tee {{ snyk_report_dir }}/dependency.txt; \
       dependency_status=${PIPESTATUS[0]}; \
       snyk code test {{ snyk_args }} 2>&1 | tee {{ snyk_report_dir }}/code.txt; \
@@ -30,6 +31,7 @@ full:
 deps:
     @mkdir -p {{ snyk_report_dir }}
     @set +e; \
+      cd {{ root_dir }} && \
       snyk test --all-projects {{ snyk_args }} 2>&1 | tee {{ snyk_report_dir }}/dependency.txt; \
       status=${PIPESTATUS[0]}; \
       echo "Snyk dependency report: {{ snyk_report_dir }}/dependency.txt"; \
@@ -39,6 +41,7 @@ deps:
 code:
     @mkdir -p {{ snyk_report_dir }}
     @set +e; \
+      cd {{ root_dir }} && \
       snyk code test {{ snyk_args }} 2>&1 | tee {{ snyk_report_dir }}/code.txt; \
       status=${PIPESTATUS[0]}; \
       echo "Snyk code report: {{ snyk_report_dir }}/code.txt"; \
