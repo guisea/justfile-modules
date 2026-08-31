@@ -5,7 +5,7 @@ identical everywhere - only auth, registry, and image name differ per repo, so t
 are the only things this module asks the consumer to set.
 
 ```just
-mod docker 'justfile-modules/docker.just'
+mod docker 'justfile-modules/docker/docker.just'
 ```
 
 Recipes run namespaced: `just docker::build`, `just docker::push`, etc.

@@ -20,14 +20,16 @@ your shell or a `.env` file. Each module that needs config ships its own
 `set dotenv-load` to the top of your justfile:
 
 ```bash
-cat justfile-modules/.env.example.docker >> .env
+cat justfile-modules/docker/.env.example.docker >> .env
 ```
 
 ```just
 set dotenv-load
 
-mod docker 'justfile-modules/docker.just'
-mod version 'justfile-modules/version.just'
+mod docker 'justfile-modules/docker/docker.just'
+mod version 'justfile-modules/version/version.just'
+mod semrel 'justfile-modules/semrel/semrel.just'
+mod snyk 'justfile-modules/snyk/snyk.just'
 ```
 
 Recipes are then namespaced under the module name:
@@ -45,17 +47,17 @@ not something this repo needs to know about.
 
 ## Modules
 
-- **`docker.just`** - build / buildx / push / login / clean. Parameterized by `IMAGE`,
+- **`docker/`** - build / buildx / push / login / clean. Parameterized by `IMAGE`,
   `REGISTRY` (or `REGISTRIES` for pushing to several registries at once, e.g. Docker
   Hub + ECR), `DOCKERFILE`, `CONTEXT`, `PLATFORMS` (all env vars) so the build logic
   itself never changes between repos - only auth, registry, and image name do. Supports
   token-based login (`docker::login`) and ECR via AWS SSO (`docker::login-ecr`). See
-  [`docker.md`](docker.md) for the full recipe reference and
-  [`.env.example.docker`](.env.example.docker) for a config template.
-- **`version.just`** - semantic-release-aware version resolution
+  [`docker/docker.md`](docker/docker.md) for the full recipe reference and
+  [`docker/.env.example.docker`](docker/.env.example.docker) for a config template.
+- **`version/`** - semantic-release-aware version resolution
   (`semantic-release` → exact git tag → short commit hash → dev-timestamp fallback),
   shared by every repo that tags images by version.
-- **`semrel.just`** - scaffolds `.release.yml` for
+- **`semrel/`** - scaffolds `.release.yml` for
   [go-semantic-release](https://github.com/go-semantic-release/semantic-release), the
   tool that actually cuts releases in CI (via `go-semantic-release/action@v1`). One
   recipe per provider - `scaffold-gitea`, `scaffold-github`, `scaffold-gitlab`,
@@ -63,7 +65,7 @@ not something this repo needs to know about.
   without a plugin, e.g. Bitbucket). Owner/repo/host default to whatever `git remote
   get-url origin` resolves to, so most repos just need e.g.
   `just semrel::scaffold-gitea` with no args. Refuses to overwrite an existing
-  `.release.yml`. Distinct from `version.just`: that one resolves a version for local
+  `.release.yml`. Distinct from `version/`: that one resolves a version for local
   use (build tags, etc); this one configures the tool that publishes the release
   itself.
 
@@ -73,6 +75,11 @@ not something this repo needs to know about.
   just semrel::scaffold-github myorg myrepo    # github, explicit owner/repo
   just semrel::scaffold-git me@example.com     # plain git tags - e.g. Bitbucket
   ```
+- **`snyk/`** - dependency and code vulnerability scanning. Runs `snyk test` for
+  dependency vulnerabilities and `snyk code test` for code issues, writing separate
+  reports plus a combined report. Requires Snyk CLI and authentication. See
+  [`snyk/snyk.md`](snyk/snyk.md) for the full recipe reference and
+  [`snyk/.env.example.snyk`](snyk/.env.example.snyk) for a config template.
 
 ## Updating a consumer repo to a newer module version
 

@@ -2,7 +2,7 @@
 # Import with: mod version 'justfile-modules/version.just'
 
 # 🏷️  Resolve the next version (semantic-release → git tag → commit hash → dev fallback)
-version:
+next:
     #!/usr/bin/env bash
     set -euo pipefail
     # Prints only the version to stdout (status goes to stderr) - safe to capture
@@ -29,12 +29,12 @@ version:
     echo "$VERSION"
 
 # 📦 Print version/commit/branch/build-date together - a release sanity check
-version-info:
+info:
     #!/usr/bin/env bash
     set -euo pipefail
     echo "📦 Version Information"
     echo "===================="
-    echo "Next version: $(just --justfile '{{ justfile() }}' version 2>/dev/null)"
+    echo "Next version: $(just --justfile '{{ justfile() }}' version next 2>/dev/null)"
     echo "Git commit:   $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
     echo "Branch:       $(git branch --show-current 2>/dev/null || echo unknown)"
     echo "Build date:   $(date -u +%Y-%m-%dT%H:%M:%SZ)"
