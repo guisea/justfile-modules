@@ -1,5 +1,5 @@
 root_dir := justfile_directory()
-snyk_report_dir := env_var_or_default("SNYK_REPORT_DIR", justfile_directory() + "/.reports/snyk/")
+snyk_report_dir := env_var_or_default("SNYK_REPORT_DIR", justfile_directory() + "/.reports/snyk")
 snyk_args := env_var_or_default("SNYK_ADDITIONAL_ARGS", "")
 
 # Run Snyk dependency and code scans, writing reports for triage.
